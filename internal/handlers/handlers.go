@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 
 	"github.com/CloudyKit/jet/v6"
 	"github.com/gorilla/websocket"
@@ -34,19 +35,20 @@ func Home(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-//WebSocketconnection is wrapper for gorilla.conn
+//WebSocketconnection is wrapper for gorilla/websocket
 type WebSocketConnection struct {
 	*websocket.Conn
 }
 
 //WsJsonResponse is struct to define the response sent back from websocket  as json
 type WsJsonResponse struct {
-	Action      string `json:"action"`
-	Message     string `json:"message"`
-	MessageType string `json:"message_type"`
+	Action         string   `json:"action"`
+	Message        string   `json:"message"`
+	MessageType    string   `json:"message_type"`
+	ConnectedUsers []string `json:"connected_users"`
 }
 
-//WsPayload is the struct for the info received from frontend
+//WsPayload is the struct for the info received from frontend connected client
 type WsPayload struct {
 	Action   string              `json:"action"`
 	Username string              `json:"username"`
@@ -54,27 +56,59 @@ type WsPayload struct {
 	Conn     WebSocketConnection `json:"-"`
 }
 
-//func to listen and response back to frontend through channel
+//go routine to send back to the frontend the payload who ListenForWS, go routine,
+//has been upload through channel, is always listening that channel, also broadcast the payload to all connected clients
 func ListenToWsChannel() {
 	var response WsJsonResponse
 	//always listen the channel
 	for {
 		//get the payload from channel
 		e := <-wsChan
-		//set the response
-		response.Action = "Got Here"
-		response.Message = fmt.Sprintf("Some messagem and action was %s", e.Action)
-		//send the response to all clients
-		broadcastToAll(response)
+
+		switch e.Action {
+		//if a connected client type their username in frontend input and press enter key
+		//response is the list of all connected users
+		case "username":
+			//get a list of all users and send back to frontendt via broadcast
+			clients[e.Conn] = e.Username //adding the client username to clients map
+			//get the list of clients username
+			users := getUserList()
+			response.Action = "list_users"
+			response.ConnectedUsers = users
+			//send the response to all clients
+			broadcastToAll(response)
+			//if in frontend a client user left the app page, their username is deleted
+		case "left_app":
+			response.Action = "list_users"
+			delete(clients, e.Conn)
+			users := getUserList()
+			response.ConnectedUsers = users
+			//send the response to all clients
+			broadcastToAll(response)
+		}
+
 	}
 
 }
 
-//func to broadcast the response to all clients
+//getUserList loop to map clients and returns slice of strings with the username of all connected clients
+func getUserList() []string {
+	var usersList []string
+	for _, x := range clients {
+		//avoid to add connected client who is not write their username yet in app frontend
+		if x != "" {
+			usersList = append(usersList, x)
+		}
+	}
+	sort.Strings(usersList)
+	return usersList
+}
+
+//broadcastToALL broadcast the payload received from a client to all connected clients
 func broadcastToAll(response WsJsonResponse) {
 	for client := range clients {
 		err := client.WriteJSON(response)
-		//error mus be due the clients disconnect form the app so deleted it
+		//error must be  a disconnected client from the app so deleted it
 		if err != nil {
 			log.Println("webSocket error")
 			_ = client.Close()
@@ -84,32 +118,35 @@ func broadcastToAll(response WsJsonResponse) {
 	}
 }
 
-//WsEndpoint function to get http connection and upgrade it to a websocket conn
+//WsEndpoint  get the http requests and response from client tryng to connect, and upgrade it to websocket protocol
+//also call ListenToWs() to  process the connected client payloads
 func WsEndpoint(w http.ResponseWriter, r *http.Request) {
+	//transform the incoming http request and response into websocket protocol
 	ws, err := upgradeConnection.Upgrade(w, r, nil)
 	if err != nil {
 		log.Print(err)
 	}
-
+	//if there is no error, a client is connected though ws protocol
 	log.Println("Client connected to endpoint")
-	//send back a response
+	//set a response msg when a client is connected to ws
 	var response WsJsonResponse
 	response.Message = `<em><small>Connected to server</small></em>`
 
 	//incoming connection to WsEndpoint is a client of WebSocketConnection type
 	// and must be added to clients map
 	conn := WebSocketConnection{Conn: ws}
-	//temporary empry entry in clients
+	//temporary empty entry in clients map
 	clients[conn] = ""
-
+	//send back the response as JSON
 	err = ws.WriteJSON(response)
 	if err != nil {
 		log.Println(err)
 	}
-	//goroutine to always listen for a payload
+	//goroutine listen for a connected clients payload
 	go ListenForWS(&conn)
 }
 
+//ListenForWS is a goroutine to listen for incoming payload and send it through channel
 func ListenForWS(conn *WebSocketConnection) {
 	//if the goroutines is stopped by panic log the error
 	defer func() {
@@ -119,7 +156,7 @@ func ListenForWS(conn *WebSocketConnection) {
 
 		}
 	}()
-	// REC: WsPayload is received from frontend
+	// REC: WsPayload is received from connected client
 	var payload WsPayload
 
 	//listen eternally for an incoming payload
@@ -129,15 +166,15 @@ func ListenForWS(conn *WebSocketConnection) {
 			//do nothing if there ir no error in incomming connections
 
 		} else {
-			//pointer to
 			payload.Conn = *conn
-			//send the payload throuh channel
+			//send the payload through channel
 			wsChan <- payload
 		}
 	}
 
 }
 
+//renderPage
 func renderPage(w http.ResponseWriter, tmpl string, data jet.VarMap) error {
 	view, err := views.GetTemplate(tmpl)
 	if err != nil {
