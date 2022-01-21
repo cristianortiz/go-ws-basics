@@ -85,6 +85,12 @@ func ListenToWsChannel() {
 			response.ConnectedUsers = users
 			//send the response to all clients
 			broadcastToAll(response)
+
+		case "broadcast":
+			response.Action = "broadcast"
+			//create the response data to show on frontend chatbox
+			response.Message = fmt.Sprintf("<strong>%s</strong>: %s", e.Username, e.Message)
+			broadcastToAll(response)
 		}
 
 	}
